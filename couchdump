@@ -1,0 +1,286 @@
+#!/usr/bin/env node
+/*jslint node: true, -W083*/
+var fs = require("fs");
+var path = require("path");
+var appDir = path.dirname(require.main.filename);
+
+var version = "0.1";
+
+function outPutUtilityInfo() {
+  console.log("couchdump v: 1.0\r\n\tDevelop By: Corey Gaspard\r\n\tLicense:GPL");
+}
+
+function outputUsageData() {
+  console.log("\tUsage Example: couchdump --host:http://localhost --port:5984 --db:dbname --user:username --password:1password --exclude:doctype:user,doctype:auth --output:filepath");
+  console.log("\t\t--help\t\tShow this message");
+  console.log("\t\t--host\t\tURL to the server");
+  console.log("\t\t--port\t\tPort that couch db is listening on");
+  console.log("\t\t--db\t\tName of the database to backup");
+  console.log("\t\t--user\t\tUser account used when performing hte backup");
+  console.log("\t\t--password\tPassword for the user account");
+  console.log("\t\t--exclude\tExclude objects basd on property and value.  Comma seperated list.");
+  console.log("\t\t--output\tPath to output the backup to");
+  console.log("\t\t--v\t\tVerbose output");
+}
+
+if (process.argv.length === 2) {
+  outPutUtilityInfo();
+  outputUsageData();
+  return;
+}
+
+var config = {
+  db: {
+    serverurl: "http://localhost",
+    serverport: 5984,
+    name: null,
+    secure: false,
+    auth: {
+      username: null,
+      password: null
+    }
+  },
+  exclude: [],
+  outputFile: null,
+  verbose: false
+};
+
+for (var i = 0; i < process.argv.length; i++) {
+  var arg = process.argv[i];
+
+  if (arg.indexOf("--host") === 0) {
+    var start = "--host:";
+    arg = arg.replace(start, "");
+    config.db.serverurl = arg;
+  }
+
+  if (arg.indexOf("--port") === 0) {
+    var start = "--port:";
+    arg = arg.replace(start, "");
+    config.db.serverport = arg;
+  }
+
+  if (arg.indexOf("--db") === 0) {
+    var start = "--db:";
+    arg = arg.replace(start, "");
+    config.db.name = arg;
+  }
+
+  if (arg.indexOf("--user") === 0) {
+    var start = "--user:";
+    arg = arg.replace(start, "");
+    config.db.auth.username = arg;
+  }
+
+  if (arg.indexOf("--password") === 0) {
+    var start = "--password:";
+    arg = arg.replace(start, "");
+    config.db.auth.password = arg;
+  }
+
+  if (arg.indexOf("--output") === 0) {
+    var start = "--output:";
+    arg = arg.replace(start, "");
+    config.outputFile = arg;
+  }
+
+  if (arg.indexOf("--help") === 0) {
+    outPutUtilityInfo();
+    outputUsageData();
+    return;
+  }
+
+  if (arg.indexOf("--exclude") === 0) {
+    var excludeDocs = [];
+    var start = "--exclude:";
+    arg = arg.replace(start, "");
+    var excludes = arg.split(",");
+    for (var q = 0; q < excludes.length; q++) {
+      var thisExclude = excludes[q];
+      if (thisExclude === undefined) {
+        continue;
+      }
+      var proParts = thisExclude.split(":");
+      excludeDocs.push({
+        "property": proParts[0],
+        "value": proParts[1]
+      });
+    }
+    config.exclude = excludeDocs;
+  }
+
+  if (arg.indexOf("--v") === 0) {
+    config.verbose = true;
+  }
+}
+
+if (config.verbose) {
+  console.log("Server URL: " + config.db.serverurl);
+  console.log("Server Port: " + config.db.serverport);
+  console.log("Database: " + config.db.name);
+  if (config.outputFile !== null) {
+    console.log("Output File: " + config.outputFile);
+  }
+  for (var q = 0; q < config.exclude.length; q++) {
+    var thisExclude = config.exclude[q];
+    console.log("Exclude: " + JSON.stringify(thisExclude));
+  }
+}
+
+var outPutMsg = "";
+
+if (config.db.serverurl === null) {
+  outPutMsg += "\r\nError, missing parameter --host:http://localhost";
+}
+
+if (config.db.serverport === null) {
+  outPutMsg += "\r\nError, missing parameter --port:5984";
+}
+
+if (config.db.name === null) {
+  outPutMsg += "\r\nError, missing parameter --db:databasename";
+}
+
+if (config.outputFile === null) {
+  outPutMsg += "\r\nError, missing parameter --output:filepath";
+}
+
+if (outPutMsg !== "") {
+  outPutUtilityInfo();
+  console.log(outPutMsg);
+  outputUsageData();
+  return;
+}
+
+if (/https/i.test(config.db.serverurl)) {
+  config.db.secure = true;
+}
+
+var cradle = require('cradle_security')();
+
+var connection = new(cradle.Connection)(
+  config.db.serverurl,
+  config.db.serverport, {
+    auth: config.db.auth,
+    secure: config.db.secure,
+    cache: true,
+    raw: false,
+    forceSave: true
+  });
+
+var dbName = config.db.name;
+var db = connection.database(dbName);
+var today = new Date();
+var dbString = "//###### Backup Created By couchdump Utility Version: " + version + "\r\n//Backup Created On:" + today + "\r\n var docs = [";
+
+console.log("Backing Up Database: " + dbName);
+
+// Step 1 Check DB exists
+db.exists(function (err, exists) {
+
+  if (err) {
+    console.log('error', err);
+    return;
+  } else if (exists) {
+    console.log('Opening DB');
+    saveDocs(function () {
+      console.log("Done!");
+      console.log("");
+    });
+
+  } else {
+    console.log("DB database doesn't exist");
+    return;
+  }
+
+});
+
+function saveDocs(callBack) {
+  db.all(function (err, res) {
+    if (err) {
+      console.log('Error: %s', err);
+    } else {
+
+      if (res.length === 0) {
+        console.log("Database is empty");
+        callBack();
+        return;
+      }
+
+      if (config.verbose) {
+        console.log("Found " + res.length + " documents");
+      }
+      //console.log(res);
+
+      var total = res.length;
+      var counter = 0;
+
+      var docStrings = dbString;
+
+      getNextDoc(res.pop());
+
+      function getNextDoc(doc) {
+        counter++;
+        if (config.verbose) {
+          console.log("Getting Doc: " + doc.id + " " + counter + "/" + total);
+        }
+        db.get(doc.id, function (err, docData) {
+          if (err) {
+            console.error(err);
+          }
+          //            console.log(JSON.stringify(docData));
+
+          var isExcluded = false;
+          for (var i = 0; i < config.exclude.length; i++) {
+            var thisExclude = config.exclude[i];
+            //console.log("Checking Exclude Property Defined: " + (docData[thisExclude.property] !== undefined));
+            //console.log("Checking Exclude Property Value: " + (docData[thisExclude.propety] === thisExclude.value) + " Value: " + thisExclude.value + "==" + docData[thisExclude.propety]);
+            if (docData[thisExclude.property] !== undefined && docData[thisExclude.property] === thisExclude.value) {
+              isExcluded = true;
+              if (config.verbose) {
+                console.log("Excluded On: " + JSON.stringify(thisExclude));
+              }
+              break;
+            }
+
+          }
+          if (!isExcluded) {
+            docStrings += JSON.stringify(docData, null, 2);
+            if (res.length > 0) {
+              docStrings += ",";
+            }
+          }
+
+          if (res.length === 0) {
+            doneGettingData(docStrings);
+            return;
+          }
+
+          getNextDoc(res.pop());
+
+        });
+
+      }
+
+      function doneGettingData(resultString) {
+
+        resultString += "];  module.exports = docs;";
+
+        if (config.outputFile === null) {
+          console.log(resultString);
+          callBack();
+        } else {
+          console.log("Saving to file: " + config.outputFile);
+          fs.writeFile(config.outputFile, resultString, function (err) {
+            if (err) {
+              throw err;
+            }
+            callBack();
+          });
+
+        }
+      }
+
+    }
+  });
+}

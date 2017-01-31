@@ -1,0 +1,17 @@
+{
+  "name": "couchutils",
+  "description": "CouchDB backup, restore and upgrade utilities",
+  "version": "1.0.0",
+  "author": "Corey Gaspard <cgaspard@gmail.com>",
+  "repository": "git@git.mygait.com:mygitserverapps/etracker.git",
+  "contributors": [
+    {
+      "name": "Corey Gaspard",
+      "email": "cgaspard@gmail.com"
+    }
+  ],
+  "dependencies": {
+    "cradle": "*",
+    "cradle_security": "*"
+  }
+}

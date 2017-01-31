@@ -1,0 +1,430 @@
+#!/usr/bin/env node
+
+/*jslint -W117, -W098, -W082 */
+var fs = require("fs");
+var consoleOverRide = require("../server/consoleOverride");
+var scriptName = process.argv[2];
+var iterativeObjects = [];
+
+var config = {
+  "verbose": false,
+  "scriptfile": null,
+  "logging": {
+    "logLevel": 3
+  }
+};
+
+var version = "1.0";
+
+function outPutUtilityInfo() {
+  console.log("runscript version: " + version + "\r\n\tDevelop By: Corey Gaspard\r\n\tLicense:GPL");
+}
+
+function outputUsageData() {
+  console.log("\tUsage Example: runscript [--v] path/scripttorun.js ");
+  console.log("\t\t--help\t\tShow this message");
+  console.log("\t\t--v\t\tVerbose output");
+}
+
+if (process.argv.length === 2) {
+  outPutUtilityInfo();
+  outputUsageData();
+  return;
+}
+
+for (var i = 0; i < process.argv.length; i++) {
+  var arg = process.argv[i];
+
+  if (arg.indexOf("--help") === 0) {
+    outPutUtilityInfo();
+    outputUsageData();
+    return;
+  }
+
+  if (arg.indexOf("--v") === 0) {
+    config.logging.logLevel = 0;
+    config.verbose = true;
+  }
+}
+
+consoleOverRide.init(config);
+
+var path = require("path");
+
+if (config.verbose) {
+  console.debug("Args: " + JSON.stringify(process.argv));
+}
+config.inputFile = path.resolve(process.argv[process.argv.length - 1]);
+
+if (config.verbose) {
+  console.debug("Checking script: " + config.inputFile);
+}
+if (!fs.existsSync(config.inputFile)) {
+  console.debug("Error: invalid file path " + config.inputFile);
+  outputUsageData();
+}
+
+console.debug("Running Script " + config.inputFile);
+
+var scriptObject = require(config.inputFile);
+
+if (scriptObject.name === undefined) {
+  console.log("Error: Missing script name!");
+  return;
+} else {
+  console.log("Script Name: " + scriptObject.name);
+}
+
+if (scriptObject.version === undefined) {
+  console.log("Error: Missing script version!");
+  return;
+} else {
+  console.log("Script Version: " + scriptObject.version);
+}
+
+if (scriptObject.description === undefined) {
+  console.log("Error: Missing script description!");
+  return;
+} else {
+  console.log("Script Description: " + scriptObject.description);
+}
+
+if (scriptObject.config === undefined) {
+  console.log("Error: Missing config object!");
+  return;
+}
+
+var scriptConfig = scriptObject.config;
+var db = null;
+if(scriptConfig.db.type === undefined) { scriptConfig.db.type = "couchdb"; }
+
+if(scriptConfig.db.type === "couchdb") {
+  /// We're using couchdb
+  db = require('../server/datadrivers/couchdb.js')(scriptConfig);
+} else if(scriptConfig.db.type === "couchbase") {
+  db = require('../server/datadrivers/couchbase.js')(scriptConfig);
+}
+
+scriptObject.db = db;
+
+// scriptObject.verbose = config.verbose;
+if (config.verbose) {
+  consoleOverRide.logLevel = 0;
+}
+
+
+/// Here is where we start
+try {
+  runInit(
+    function(initErr) {
+      if(initErr) { abort(initErr); return; }
+      runRun(
+        function(runErr) {
+          if(runErr) { abort(runErr); return; }
+          runAddDocs(
+            function(errUpdates) {
+              if(errUpdates) { abort(errUpdates); return; }
+              runView(
+                function(runViewError) {
+                  if(runViewError) { abort(runViewError); return; }
+                  runViews(
+                    function(runViewsError) {
+                      if(runViewsError) { abort(runViewsError); return; }
+                      runDelDocs(
+                        function(runDelDocsError) {
+                          if(runDelDocsError) { abort(runDelDocsError); return; }
+                          db.disconnect();
+                          console.log("Done!!");
+                          process.exit();
+                          return;
+                        }
+                      )
+                    }
+                  );
+                }
+              );
+            }
+          );
+        }
+      )
+    }
+  );
+} catch (ex) {
+  abort(ex);
+  return;
+}
+
+function abort(err) {
+  console.trace();
+  console.log("Aborted due to error: " + err);
+}
+
+function runInit(finishedCallBack) {
+  if (scriptObject.init !== undefined) {
+    scriptObject.init();
+  }
+  if (scriptObject.initAsync !== undefined) {
+    scriptObject.initAsync(function(initErr) {
+      finishedCallBack(initErr);
+    })
+  } else {
+    finishedCallBack(null);
+  }
+}
+
+function runRun(finishedCallBack) {
+  if (scriptObject.run !== undefined) {
+    scriptObject.run();
+  }
+  if (scriptObject.runAsync !== undefined) {
+    scriptObject.runAsync(function(runErr) {
+      finishedCallBack(runErr);
+    })
+  } else {
+    finishedCallBack(null);
+  }
+}
+
+function runViews(finishedCallBack) {
+  if (scriptObject.updateViews === undefined) {
+    console.log("No Views Found");
+    finishedCallBack(null);
+  } else {
+    console.log("Running Views");
+
+    function ProccessNextView() {
+      var processView = scriptObject.updateViews.shift();
+      if (processView === null) {
+        finishedCallBack(null, null);
+        return;
+      }
+      if (processView.description !== undefined) {
+        console.log("Update Description: " + processView.description);
+      }
+      if (processView.updateID !== undefined) {
+        db.get(processView.updateID, function(err, object) {
+          if (err) {
+            finishedCallBack(err, null);
+            return;
+          }
+          iterativeObjects.push(object);
+          processObjects(processView, function(err) {
+            /// done processing objects
+            if (err) {
+              finishedCallBack(err, null);
+              return;
+            } else if (scriptObject.updateViews.length > 0) {
+              ProccessNextView();
+            } else {
+              finishedCallBack(null, null);
+              return;
+            }
+          });
+
+        });
+      } else {
+        console.log("Running View:"+ processView.updateView);
+        db.view(processView.updateView, processView.updateKey, function(err, objects) {
+          // console.log("Done View:"+ processView.updateView);
+          // console.debug("Done View Objects:" + JSON.stringify(objects));
+          if (err) {
+            console.log("Error:" +err);
+            finishedCallBack(err, null);
+            return;
+          } else if (objects.length === 0) {
+            console.log("Error:" +err);
+            finishedCallBack(new Error("Unable to load docs"));
+          } else {
+            iterativeObjects = stripCouchDBArrayValues(objects);
+            processObjects(processView, function(err) {
+              /// done processing objects
+              if (err) {
+                finishedCallBack(err, null);
+                return;
+              } else if (scriptObject.updateViews.length > 0) {
+                ProccessNextView();
+              } else {
+                finishedCallBack(null, null);
+                return;
+              }
+            });
+          }
+        });
+      }
+    }
+    ProccessNextView();
+  }
+}
+
+function runView(finishedCallBack) {
+  if (scriptObject.updateView === undefined) {
+    console.log("No View Found");
+    finishedCallBack(null);
+  } else {
+    console.log("Running View:"+ scriptObject.updateView);
+    db.view(scriptObject.updateView, scriptObject.upateKey, function(err, objects) {
+      console.log("Done View:"+ scriptObject.updateView);
+      if (err) {
+        finishedCallBack(err, null);
+        return;
+      } else if (objects.length === 0) {
+        finishedCallBack(new Error("Unable to load docs"));
+      } else {
+        iterativeObjects = stripCouchDBArrayValues(objects);
+        processObjects(scriptObject.updateView, function(err) {
+          if (err) {
+            finishedCallBack(err);
+            return;
+          } else {
+            finishedCallBack(null, null);
+          }
+        });
+      }
+    });
+  }
+}
+
+function runDelDocs(finishedCallBack) {
+  if (scriptObject.delDocs === undefined) {
+    console.log("No DelDocs Found");
+    finishedCallBack(null);
+  } else {
+    console.log("Running DelDocs");
+    var docsToDelete = scriptObject.delDocs();
+
+    if(docsToDelete === undefined || !Array.isArray(docsToDelete) || docsToDelete.length <= 0) {
+      finishedCallBack(null);
+    } else {
+      processNext(docsToDelete, finishedCallBack);
+    }
+
+    function processNext(delDocs, innerFinishedCallBack) {
+
+        if(delDocs.length <= 0) {
+          innerFinishedCallBack(null);
+          return;
+        }
+
+        var docToDelete = delDocs.shift();
+        var idToDelete = null;
+        if(docToDelete._id === undefined) {
+          idToDelete = docToDelete;
+        } else {
+          idToDelete = docToDelete._id;
+        }
+
+        if (scriptObject.dryRunMode) {
+          console.log("Would have deleted document '" + idToDelete + "'");
+          processNext(delDocs, innerFinishedCallBack);
+        } else {
+          db.remove(idToDelete, function(delErr, result) {
+            if(delErr) {
+              innerFinishedCallBack(delErr);
+            } else {
+              console.log("Deleted document '" + idToDelete + "'");
+              processNext(delDocs, innerFinishedCallBack);
+            }
+          });
+        }
+    }
+  }
+}
+
+function runAddDocs(finishedCallBack) {
+  if (scriptObject.addDocs === undefined) {
+    console.log("No AddDocs Found");
+    finishedCallBack(null);
+  } else {
+    console.log("Running AddDocs");
+    var newDocs = scriptObject.addDocs();
+    console.log("Adding " + newDocs.length + " documents and views to the database");
+    db.save(newDocs, function(err) {
+      if (err) {
+        finishedCallBack(err);
+        return;
+      } else {
+        finishedCallBack(null);
+      }
+    });
+  }
+}
+
+function saveObjectsAsync(allAtOnce, callBack) {
+  if (iterativeObjects.length === 0) {
+    callBack(null);
+  }
+  if(allAtOnce === undefined) {
+    allAtOnce = false;
+
+  }
+  console.debug("Saving Object Async: " + iterativeObjects[0]._id);
+  if(allAtOnce) {
+    console.log("Saving all at once");
+    db.save(iterativeObjects, function(err) {
+      /// Save completed so get out of here;
+      if (err) {
+        callBack(err, null);
+        return;
+
+      } else {
+        callBack(null)
+        iterativeObjects = [];
+      }
+    });
+
+  } else {
+    db.save(iterativeObjects[0], function(err) {
+      /// Save completed so get out of here;
+      iterativeObjects.shift();
+      if (err) {
+        callBack(err, null);
+        return;
+      } else if (iterativeObjects.length === 0) {
+        callBack();
+      } else {
+        saveObjectsAsync(allAtOnce, callBack);
+      }
+    });
+
+  }
+
+}
+
+
+function processObjects(view, callBack) {
+  for (var i = 0; i < iterativeObjects.length; i++) {
+    console.debug("Update Object: " + iterativeObjects[i]._id);
+    try {
+      if (view.processFunction === undefined  && view.processObject !== undefined) {
+        iterativeObjects[i] = scriptObject.processObject(iterativeObjects[i]);
+      } else {
+        //console.log("Type of :" + JSON.stringify(view));
+        iterativeObjects[i] = view.updateFunction(iterativeObjects[i]);
+      }
+    } catch(ex) {
+      console.log("Error:" + ex);
+      callBack(ex, null);
+    }
+  }
+  if (scriptObject.saveObjectsAsync === undefined) {
+    scriptObject.saveObjectsAsync = true;
+  }
+  if (scriptObject.saveObjectsAsync !== undefined && scriptObject.saveObjectsAsync === true) {
+    console.log("Saving Async");
+    saveObjectsAsync(view.saveAllAtOnce, callBack);
+  } else {
+    db.save(iterativeObjects, function(err) {
+      console.log("Saving Objects After Update");
+      /// Save completed so get out of here;
+      callBack(err);
+    });
+  }
+}
+
+function stripCouchDBArrayValues(arry) {
+  var resultArry = [];
+  for (var i = 0; i < arry.length; i++) {
+    resultArry[resultArry.length] = arry[i].value;
+  }
+  return resultArry;
+}
